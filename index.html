@@ -53,6 +53,7 @@ dialog textarea{height:84px;max-height:none;border-radius:10px}
 .row{display:flex;gap:8px;margin-top:18px}
 .row button{flex:1;padding:11px;border-radius:12px;font-weight:600;border:1px solid var(--line)}
 .row .pri{background:var(--ac);color:var(--on);border-color:var(--ac)}
+.lnk{margin-top:8px;color:var(--ac);font-weight:600;padding:6px 0}
 .hint{font-size:12px;color:var(--mute);margin-top:6px}
 #toast{position:fixed;left:50%;bottom:90px;transform:translateX(-50%);background:var(--ink);color:var(--bg);padding:8px 14px;border-radius:10px;font-size:14px;opacity:0;pointer-events:none;transition:opacity .2s;max-width:90vw}
 #toast.on{opacity:1}
@@ -82,15 +83,16 @@ dialog textarea{height:84px;max-height:none;border-radius:10px}
   <h2>Настройки</h2>
   <label for="prov">Провайдер</label>
   <select id="prov">
+    <option value="openai">NyxOS / OpenAI-совместимый</option>
     <option value="anthropic">Claude (Anthropic)</option>
-    <option value="openai">OpenAI или совместимый</option>
     <option value="gemini">Gemini (Google)</option>
   </select>
   <label for="key">API-ключ</label>
   <input id="key" type="password" autocomplete="off" placeholder="Вставь ключ">
-  <div id="baseW"><label for="base">Адрес API (base URL)</label><input id="base" placeholder="https://api.openai.com/v1"></div>
+  <div id="baseW"><label for="base">Адрес API (base URL)</label><input id="base" placeholder="https://api.nyxos.shop/v1"></div>
   <label for="model">Модель</label>
-  <input id="model">
+  <input id="model" placeholder="название модели">
+  <div id="mlW"><button type="button" class="lnk" id="ml">Загрузить список моделей</button><select id="msel" hidden style="margin-top:6px"></select></div>
   <label for="sys">Инструкция агенту</label>
   <textarea id="sys"></textarea>
   <p class="hint">Ключ хранится только на этом телефоне и отправляется только провайдеру.</p>
@@ -100,9 +102,16 @@ dialog textarea{height:84px;max-height:none;border-radius:10px}
 
 <script>
 const $=s=>document.querySelector(s);
-const DEF={anthropic:'claude-sonnet-5-5',openai:'gpt-4o',gemini:'gemini-2.5-flash'};
-let cfg={provider:'anthropic',key:'',model:DEF.anthropic,base:'https://api.openai.com/v1',system:'Ты — полезный ИИ-ассистент. Отвечай на языке пользователя.'};
-try{Object.assign(cfg,JSON.parse(localStorage.getItem('cfg')||'{}'))}catch(e){}
+const DEF={anthropic:'claude-sonnet-5-5',openai:'',gemini:'gemini-2.5-flash'};
+const NYX='https://api.nyxos.shop/v1';
+function apiBase(b){b=(b||'').trim().replace(/\/+$/,'');return /\/v\d+$/.test(b)?b:b+'/v1'}
+async function rj(r){const t=await r.text();let d;try{d=JSON.parse(t)}catch(e){throw new Error('Сервер вернул не JSON ('+r.status+'). Проверь адрес API: '+t.slice(0,80).replace(/\s+/g,' '))}if(!r.ok)throw new Error((d.error&&(d.error.message||d.error))||r.status);return d}
+let cfg={provider:'openai',key:'',model:'',base:NYX,system:'Ты — полезный ИИ-ассистент. Отвечай на языке пользователя.'};
+try{
+  const n=localStorage.getItem('cfg2'),o=localStorage.getItem('cfg');
+  if(n)Object.assign(cfg,JSON.parse(n));
+  else if(o)cfg.key=(JSON.parse(o).key)||'';
+}catch(e){}
 let chat=[];try{chat=JSON.parse(localStorage.getItem('chat')||'[]')}catch(e){}
 let pending=[],busy=false;
 
@@ -171,9 +180,12 @@ function build(){
   if(p==='anthropic') return chat.map(m=>({role:m.role,content:[
     ...(m.files||[]).filter(f=>f.data).map(f=>f.kind==='image'?{type:'image',source:{type:'base64',media_type:'image/jpeg',data:f.data}}:{type:'document',source:{type:'base64',media_type:'application/pdf',data:f.data}}),
     {type:'text',text:fullText(m)}]}));
-  if(p==='openai') return chat.map(m=>({role:m.role,content:[
-    ...(m.files||[]).filter(f=>f.data&&f.kind==='image').map(f=>({type:'image_url',image_url:{url:'data:image/jpeg;base64,'+f.data}})),
-    {type:'text',text:fullText(m)+((m.files||[]).some(f=>f.kind==='pdf')?'\n\n[PDF этот провайдер не принимает напрямую]':'')}]}));
+  if(p==='openai') return chat.map(m=>{
+    const imgs=(m.files||[]).filter(f=>f.data&&f.kind==='image');
+    const t=fullText(m)+((m.files||[]).some(f=>f.kind==='pdf')?'\n\n[PDF этот провайдер не принимает напрямую]':'');
+    if(!imgs.length)return {role:m.role,content:t};
+    return {role:m.role,content:[...imgs.map(f=>({type:'image_url',image_url:{url:'data:image/jpeg;base64,'+f.data}})),{type:'text',text:t}]};
+  });
   return chat.map(m=>({role:m.role==='user'?'user':'model',parts:[
     {text:fullText(m)},
     ...(m.files||[]).filter(f=>f.data).map(f=>({inlineData:{mimeType:f.kind==='image'?'image/jpeg':'application/pdf',data:f.data}}))]}));
@@ -188,10 +200,12 @@ async function call(){
     return d.content.filter(x=>x.type==='text').map(x=>x.text).join('\n');
   }
   if(p==='openai'){
-    r=await fetch(cfg.base.replace(/\/$/,'')+'/chat/completions',{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+cfg.key},
+    r=await fetch(apiBase(cfg.base)+'/chat/completions',{method:'POST',headers:{'content-type':'application/json','authorization':'Bearer '+cfg.key},
       body:JSON.stringify({model:cfg.model,messages:[{role:'system',content:cfg.system},...msgs]})});
-    d=await r.json();if(!r.ok)throw new Error(d.error&&d.error.message||r.status);
-    return d.choices[0].message.content;
+    d=await rj(r);
+    const c=d.choices&&d.choices[0]&&d.choices[0].message;
+    if(!c)throw new Error('Пустой ответ от сервера');
+    return typeof c.content==='string'?c.content:(c.content||[]).map(x=>x.text||'').join('');
   }
   r=await fetch('https://generativelanguage.googleapis.com/v1beta/models/'+encodeURIComponent(cfg.model)+':generateContent',{method:'POST',headers:{'content-type':'application/json','x-goog-api-key':cfg.key},
     body:JSON.stringify({systemInstruction:{parts:[{text:cfg.system}]},contents:msgs})});
@@ -206,6 +220,7 @@ async function send(){
   const t=$('#t').value.trim();
   if(!t&&!pending.length)return;
   if(!cfg.key){openSet();return}
+  if(!cfg.model){openSet();toast('Выбери модель');return}
   chat.push({role:'user',text:t,files:pending});
   pending=[];renderPend();$('#t').value='';grow();
   busy=true;render();
@@ -224,12 +239,27 @@ async function send(){
 }
 
 function grow(){const t=$('#t');t.style.height='auto';t.style.height=Math.min(t.scrollHeight,150)+'px'}
-function syncBase(){$('#baseW').style.display=$('#prov').value==='openai'?'block':'none'}
+function syncBase(){const o=$('#prov').value==='openai';$('#baseW').style.display=o?'block':'none';$('#mlW').style.display=o?'block':'none'}
+async function loadModels(silent){
+  const key=$('#key').value.trim();
+  if(!key){if(!silent)toast('Сначала вставь ключ');return}
+  try{
+    const r=await fetch(apiBase($('#base').value||NYX)+'/models',{headers:{authorization:'Bearer '+key}});
+    const d=await rj(r);
+    const ids=(d.data||[]).map(m=>m.id).sort();
+    if(!ids.length)throw new Error('список пуст');
+    const s=$('#msel');s.innerHTML='<option value="">Выбери модель…</option>'+ids.map(i=>'<option>'+esc(i)+'</option>').join('');
+    s.hidden=false;if(!silent)toast('Моделей: '+ids.length);
+  }catch(e){if(!silent)toast('Не удалось загрузить: '+(e.message||e))}
+}
 function openSet(){
   $('#prov').value=cfg.provider;$('#key').value=cfg.key;$('#base').value=cfg.base;$('#model').value=cfg.model;$('#sys').value=cfg.system;
   syncBase();$('#dlg').showModal();
+  if(cfg.provider==='openai'&&cfg.key&&$('#msel').hidden)loadModels(true);
 }
 
+$('#ml').onclick=()=>loadModels(false);
+$('#msel').onchange=e=>{if(e.target.value)$('#model').value=e.target.value};
 $('#t').addEventListener('input',grow);
 $('#t').addEventListener('keydown',e=>{if(e.key==='Enter'&&(e.ctrlKey||e.metaKey)){e.preventDefault();send()}});
 $('#f').addEventListener('submit',e=>{e.preventDefault();send()});
@@ -242,8 +272,8 @@ $('#set').onclick=openSet;
 $('#cancel').onclick=()=>$('#dlg').close();
 $('#prov').onchange=()=>{$('#model').value=DEF[$('#prov').value];syncBase()};
 $('#save').onclick=()=>{
-  cfg={provider:$('#prov').value,key:$('#key').value.trim(),base:$('#base').value.trim()||'https://api.openai.com/v1',model:$('#model').value.trim()||DEF[$('#prov').value],system:$('#sys').value};
-  localStorage.setItem('cfg',JSON.stringify(cfg));$('#dlg').close();render();toast('Сохранено');
+  cfg={provider:$('#prov').value,key:$('#key').value.trim(),base:apiBase($('#base').value||NYX),model:$('#model').value.trim()||DEF[$('#prov').value],system:$('#sys').value};
+  localStorage.setItem('cfg2',JSON.stringify(cfg));$('#dlg').close();render();toast('Сохранено');
 };
 if('serviceWorker' in navigator)navigator.serviceWorker.register('sw.js').catch(()=>{});
 render();
